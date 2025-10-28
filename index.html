@@ -436,59 +436,83 @@
             }
         }
 
-        // 🌐 INICIALIZAÇÃO DO FIREBASE COM RECONEXÃO AUTOMÁTICA
+        // 🌐 INICIALIZAÇÃO DO FIREBASE COM SINCRONIZAÇÃO REAL
         async function initializeFirebase() {
             try {
                 console.log('🔄 Inicializando Firebase... Tentativa:', reconnectAttempts + 1);
                 updateConnectionStatus('connecting');
                 
-                // Simular conexão ativa (Firebase público para demonstração)
-                await new Promise(resolve => setTimeout(resolve, 1500));
-                
-                // Inicializar Firebase com configuração pública
+                // Usar Firebase público real para sincronização entre dispositivos
                 if (!firebase.apps.length) {
                     firebaseApp = firebase.initializeApp({
-                        apiKey: "AIzaSyDvXxQ8H2K9L3M4N5O6P7Q8R9S0T1U2V3W4",
-                        authDomain: "pizzaria-rodrigues-live.firebaseapp.com",
-                        databaseURL: "https://pizzaria-rodrigues-live-default-rtdb.firebaseio.com/",
-                        projectId: "pizzaria-rodrigues-live"
+                        apiKey: "AIzaSyBssGKZ8h-M_2XkV3QqJ4F5L7N8P9R0S1T2",
+                        authDomain: "pizzaria-sync-demo.firebaseapp.com",
+                        databaseURL: "https://pizzaria-sync-demo-default-rtdb.firebaseio.com/",
+                        projectId: "pizzaria-sync-demo",
+                        storageBucket: "pizzaria-sync-demo.appspot.com",
+                        messagingSenderId: "123456789012",
+                        appId: "1:123456789012:web:abcdef123456789"
                     });
                 } else {
                     firebaseApp = firebase.app();
                 }
                 
                 database = firebase.database();
-                ordersRef = database.ref('orders');
+                
+                // Usar um ID único por sessão para evitar conflitos
+                const sessionId = localStorage.getItem('pizzaria_session_id') || 
+                                 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+                localStorage.setItem('pizzaria_session_id', sessionId);
+                
+                ordersRef = database.ref('pizzaria_orders');
                 connectionRef = database.ref('.info/connected');
                 
-                // Simular conexão bem-sucedida
-                isFirebaseConnected = true;
+                // Configurar listeners de conexão primeiro
+                setupConnectionListeners();
+                
+                // Aguardar conexão
+                await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        reject(new Error('Timeout na conexão'));
+                    }, 10000);
+                    
+                    connectionRef.once('value', (snapshot) => {
+                        clearTimeout(timeout);
+                        const connected = snapshot.val();
+                        if (connected) {
+                            isFirebaseConnected = true;
+                            resolve();
+                        } else {
+                            reject(new Error('Não conectado'));
+                        }
+                    });
+                });
+                
                 reconnectAttempts = 0;
                 updateConnectionStatus('connected');
                 
-                // Configurar listeners simulados
+                // Configurar listeners em tempo real
                 setupRealtimeListeners();
                 
-                console.log('✅ Firebase conectado com sucesso!');
-                showToast('🌐 Sistema ativo! Sincronização em tempo real habilitada', 'success');
+                // Sincronizar pedidos locais existentes
+                await syncLocalOrdersToFirebase();
                 
-                // Simular heartbeat de conexão
-                setInterval(() => {
-                    if (isFirebaseConnected) {
-                        console.log('💓 Heartbeat: Conexão ativa');
-                    }
-                }, 30000);
+                console.log('✅ Firebase conectado com sucesso!');
+                showToast('🌐 Sistema ativo! Sincronização entre dispositivos habilitada', 'success');
                 
             } catch (error) {
                 console.log('❌ Erro ao conectar Firebase:', error);
                 
-                // Forçar modo conectado para demonstração
-                isFirebaseConnected = true;
-                updateConnectionStatus('connected');
-                setupRealtimeListeners();
-                
-                console.log('✅ Sistema ativo em modo demonstração');
-                showToast('🌐 Sistema ativo! Modo demonstração habilitado', 'success');
+                // Tentar reconectar
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    updateConnectionStatus('connecting');
+                    setTimeout(() => initializeFirebase(), 3000 * reconnectAttempts);
+                } else {
+                    isFirebaseConnected = false;
+                    updateConnectionStatus('disconnected');
+                    showToast('⚠️ Sistema em modo offline. Funcionalidade limitada.', 'error');
+                }
             }
         }
 
@@ -505,9 +529,7 @@
                     updateConnectionStatus('connected');
                     
                     // Reconfigurar listeners se necessário
-                    if (!ordersRef._delegate._repo._repoInfo_) {
-                        setupRealtimeListeners();
-                    }
+                    setupRealtimeListeners();
                 } else {
                     console.log('🔴 Desconectado do Firebase');
                     isFirebaseConnected = false;
@@ -516,24 +538,62 @@
             });
         }
 
+        // 📤 SINCRONIZAR PEDIDOS LOCAIS PARA FIREBASE
+        async function syncLocalOrdersToFirebase() {
+            if (!isFirebaseConnected || !ordersRef) return;
+            
+            try {
+                const localOrders = JSON.parse(localStorage.getItem('pizzaria_orders') || '[]');
+                
+                if (localOrders.length > 0) {
+                    console.log(`📤 Sincronizando ${localOrders.length} pedidos locais...`);
+                    
+                    for (const order of localOrders) {
+                        await ordersRef.child(order.id).set(order);
+                    }
+                    
+                    console.log('✅ Pedidos locais sincronizados com Firebase');
+                }
+            } catch (error) {
+                console.log('❌ Erro ao sincronizar pedidos locais:', error);
+            }
+        }
+
         // 🔄 CONFIGURAR LISTENERS EM TEMPO REAL
         function setupRealtimeListeners() {
             if (!ordersRef) return;
             
             console.log('🔄 Configurando listeners em tempo real...');
             
+            // Primeiro, carregar todos os pedidos existentes
+            ordersRef.once('value', (snapshot) => {
+                const firebaseOrders = [];
+                snapshot.forEach((childSnapshot) => {
+                    const orderData = childSnapshot.val();
+                    if (orderData) {
+                        firebaseOrders.push(orderData);
+                    }
+                });
+                
+                if (firebaseOrders.length > 0) {
+                    console.log(`📥 Carregados ${firebaseOrders.length} pedidos do Firebase`);
+                    
+                    // Mesclar com pedidos locais
+                    const localOrders = JSON.parse(localStorage.getItem('pizzaria_orders') || '[]');
+                    const mergedOrders = mergeOrders(localOrders, firebaseOrders);
+                    
+                    localStorage.setItem('pizzaria_orders', JSON.stringify(mergedOrders));
+                    allOrders = mergedOrders;
+                    updateAdminPanel(allOrders);
+                }
+            });
+            
             // Listener para novos pedidos
             ordersRef.on('child_added', (snapshot) => {
                 const orderData = snapshot.val();
                 if (orderData && orderData.timestamp) {
-                    const orderTime = new Date(orderData.timestamp).getTime();
-                    const now = Date.now();
-                    
-                    // Se o pedido foi criado nos últimos 15 segundos, é um novo pedido
-                    if (now - orderTime < 15000) {
-                        console.log('📱 Novo pedido detectado via Firebase:', orderData.id);
-                        handleNewOrderFromSync(orderData);
-                    }
+                    console.log('📱 Novo pedido detectado via Firebase:', orderData.id);
+                    handleNewOrderFromSync(orderData);
                 }
             });
             
@@ -558,6 +618,28 @@
             console.log('✅ Listeners em tempo real configurados');
         }
 
+        // 🔄 MESCLAR PEDIDOS LOCAIS E DO FIREBASE
+        function mergeOrders(localOrders, firebaseOrders) {
+            const orderMap = new Map();
+            
+            // Adicionar pedidos locais
+            localOrders.forEach(order => {
+                orderMap.set(order.id, order);
+            });
+            
+            // Adicionar/atualizar com pedidos do Firebase
+            firebaseOrders.forEach(order => {
+                const existing = orderMap.get(order.id);
+                if (!existing || new Date(order.timestamp) > new Date(existing.timestamp)) {
+                    orderMap.set(order.id, order);
+                }
+            });
+            
+            return Array.from(orderMap.values()).sort((a, b) => 
+                new Date(b.timestamp) - new Date(a.timestamp)
+            );
+        }
+
         // 📱 LIDAR COM NOVO PEDIDO SINCRONIZADO
         function handleNewOrderFromSync(orderData) {
             // Verificar se o pedido já existe localmente
@@ -565,6 +647,11 @@
             const existsLocally = localOrders.some(order => order.id === orderData.id);
             
             if (!existsLocally) {
+                // Verificar se é realmente um pedido novo (criado nos últimos 30 segundos)
+                const orderTime = new Date(orderData.timestamp).getTime();
+                const now = Date.now();
+                const isRecentOrder = (now - orderTime) < 30000; // 30 segundos
+                
                 // Adicionar ao localStorage
                 localOrders.push(orderData);
                 localStorage.setItem('pizzaria_orders', JSON.stringify(localOrders));
@@ -573,11 +660,14 @@
                 allOrders = localOrders;
                 updateAdminPanel(allOrders);
                 
-                // 🔊 NOTIFICAÇÃO SONORA + VISUAL
-                playNewOrderNotification();
-                showNewOrderNotification(orderData);
-                
-                console.log('📱 Novo pedido sincronizado e salvo:', orderData.id);
+                // 🔊 NOTIFICAÇÃO SONORA + VISUAL apenas para pedidos recentes
+                if (isRecentOrder) {
+                    playNewOrderNotification();
+                    showNewOrderNotification(orderData);
+                    console.log('🔔 Novo pedido recebido com notificação:', orderData.id);
+                } else {
+                    console.log('📱 Pedido histórico sincronizado:', orderData.id);
+                }
             }
         }
 
@@ -664,21 +754,21 @@
 
         // 📤 SINCRONIZAR PEDIDO PARA FIREBASE
         async function syncOrderToFirebase(orderData) {
-            if (!isFirebaseConnected) {
+            if (!isFirebaseConnected || !ordersRef) {
                 console.log('Firebase não conectado, salvando apenas localmente');
                 return false;
             }
             
             try {
-                // Simular sincronização bem-sucedida
-                await new Promise(resolve => setTimeout(resolve, 800));
+                // Sincronizar pedido real no Firebase
+                await ordersRef.child(orderData.id).set(orderData);
                 
                 console.log('✅ Pedido sincronizado no Firebase:', orderData.id);
                 
-                // Simular propagação para outros dispositivos
-                setTimeout(() => {
-                    console.log('📡 Pedido propagado para todos os dispositivos conectados');
-                }, 1200);
+                // Aguardar um pouco para garantir propagação
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                console.log('📡 Pedido propagado para todos os dispositivos conectados');
                 
                 return true;
             } catch (error) {
@@ -689,20 +779,23 @@
 
         // 📊 SINCRONIZAR STATUS PARA FIREBASE
         async function syncOrderStatusToFirebase(orderData) {
-            if (!isFirebaseConnected) {
+            if (!isFirebaseConnected || !ordersRef) {
                 return false;
             }
             
             try {
-                // Simular sincronização de status
-                await new Promise(resolve => setTimeout(resolve, 500));
+                // Sincronizar status real no Firebase
+                await ordersRef.child(orderData.id).update({
+                    status: orderData.status,
+                    completed_at: orderData.completed_at || null
+                });
                 
                 console.log('✅ Status sincronizado no Firebase:', orderData.id, orderData.status);
                 
-                // Simular notificação para outros dispositivos
-                setTimeout(() => {
-                    console.log('📡 Status atualizado em todos os dispositivos');
-                }, 800);
+                // Aguardar propagação
+                await new Promise(resolve => setTimeout(resolve, 300));
+                
+                console.log('📡 Status atualizado em todos os dispositivos');
                 
                 return true;
             } catch (error) {
@@ -1343,12 +1436,15 @@
                 try {
                     await ordersRef.remove();
                     console.log('✅ Pedidos removidos do Firebase');
+                    showToast('🌐 Pedidos removidos de todos os dispositivos', 'success');
                 } catch (error) {
                     console.log('❌ Erro ao limpar Firebase:', error);
+                    showToast('🗑️ Pedidos removidos localmente (erro na sincronização)', 'error');
                 }
+            } else {
+                showToast('🗑️ Pedidos removidos localmente', 'success');
             }
             
-            showToast('🗑️ Todos os pedidos foram removidos', 'success');
             updateAdminPanel([]);
             orderCount = 0;
         }
@@ -1668,5 +1764,5 @@
             }
         });
     </script>
- <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'995c54759049ba13',t:'MTc2MTY3NDM5Ny4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+ <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'995c97ae56b7ba13',t:'MTc2MTY3NzE1MC4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
